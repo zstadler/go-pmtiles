@@ -8,6 +8,7 @@ import (
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/dustin/go-humanize"
 	"github.com/paulmach/orb"
+	"github.com/paulmach/orb/maptile"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
 	"io"
@@ -16,6 +17,8 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -234,6 +237,19 @@ func MergeRanges(ranges []srcDstRange, overfetch float32) (*list.List, uint64) {
 	return result, totalBytes
 }
 
+// ZxyToBBox converts Z, X, Y tile coordinates to a geographic bounding box.
+// The bounding box is shrunk based on maxzoom to prevent rounding from exceeding the boundaries.
+func ZxyToBBox(z uint8, x uint32, y uint32, maxzoom uint8) string {
+	// This uses the orb.maptile package to get the tile bounds.
+	// We need to convert from our Z,X,Y to maptile.Tile
+	tile := maptile.New(x, y, maptile.Zoom(z))
+	// Set the buffer size to a maxzoom+4 tile width 
+	bufferSize := -360 / math.Pow(2, float64(maxzoom)+4)
+	// Negative pad performs a shrink on the tile bounds
+	tileBounds := tile.Bound().Pad(bufferSize)
+	return fmt.Sprintf("%f,%f,%f,%f", tileBounds.Left(), tileBounds.Bottom(), tileBounds.Right(), tileBounds.Top())
+}
+
 // Extract a smaller archive from local or remote archive.
 // 1. Get the root directory (check that it is clustered)
 // 2. Turn the input geometry into a relevance bitmap (using min(maxzoom, headermaxzoom))
@@ -243,13 +259,13 @@ func MergeRanges(ranges []srcDstRange, overfetch float32) (*list.List, uint64) {
 //   - a new total directory (root + leaf directories)
 //   - a sorted slice of byte ranges in the old file required
 //
-// 6. Merge requested ranges using an overfetch parametter
+// 6. Merge requested ranges using an overfetch parameter
 // 7. write the modified header
 // 8. write the root directory.
 // 9. get and write the metadata.
 // 10. write the leaf directories (if any)
 // 11. Get all tiles, and write directly to the output.
-func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, bbox string, output string, downloadThreads int, overfetch float32, dryRun bool) error {
+func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool) error {
 	// 1. fetch the header
 	start := time.Now()
 	ctx := context.Background()
@@ -297,6 +313,33 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 
 	if minzoom > maxzoom {
 		return fmt.Errorf("minzoom cannot be greater than maxzoom")
+	}
+
+	if tileStr != "" {
+		if regionFile != "" || bbox != "" {
+			return fmt.Errorf("cannot specify --tile with --region or --bbox")
+		}
+
+		parts := strings.Split(tileStr, ",")
+		if len(parts) != 3 {
+			return fmt.Errorf("invalid tile format. Expected Z,X,Y (e.g., 6,18,25)")
+		}
+
+		z, err := strconv.ParseUint(parts[0], 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid zoom level in tile: %w", err)
+		}
+		x, err := strconv.ParseUint(parts[1], 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid X coordinate in tile: %w", err)
+		}
+		y, err := strconv.ParseUint(parts[2], 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid Y coordinate in tile: %w", err)
+		}
+
+		// Calculate the bounding box for the given tile
+		bbox = ZxyToBBox(uint8(z), uint32(x), uint32(y), uint8(maxzoom))
 	}
 
 	var relevantSet *roaring64.Bitmap
