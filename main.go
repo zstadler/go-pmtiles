@@ -61,6 +61,7 @@ var cli struct {
 		Bucket          string  `help:"Remote bucket of input archive"`
 		Region          string  `help:"local GeoJSON Polygon or MultiPolygon file for area of interest" type:"existingfile"`
 		Bbox            string  `help:"bbox area of interest: min_lon,min_lat,max_lon,max_lat" type:"string"`
+		Tile            string  `help:"Tile ID of the area of interest: Zoom,X,Y" type:"string"`
 		Minzoom         int8    `default:"-1" help:"Minimum zoom level, inclusive"`
 		Maxzoom         int8    `default:"-1" help:"Maximum zoom level, inclusive"`
 		DownloadThreads int     `default:"4" help:"Number of download threads"`
@@ -174,7 +175,7 @@ func main() {
 			logger.Fatal(startHTTPServer(cli.Serve.Interface+":"+strconv.Itoa(cli.Serve.Port), mux))
 		}
 	case "extract <input> <output>":
-		err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
+		err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
 		if err != nil {
 			logger.Fatalf("Failed to extract, %v", err)
 		}
