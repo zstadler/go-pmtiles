@@ -189,8 +189,13 @@ func main() {
 			outputZX := strings.ReplaceAll(outputZ, "$X", strconv.Itoa(x))
 			for y := 0; y < numtiles; y++ {
 				outputZXY := strings.ReplaceAll(outputZX, "$Y", strconv.Itoa(y))
+				dir := filepath.Dir(outputZXY)
+				err := os.MkdirAll(dir, 0755)
+				if err != nil {
+					logger.Fatalf("Error creating directory '%s': %v\n", dir, err)
+				}
 				tile := fmt.Sprintf("%d,%d,%d", cli.Extract.Minzoom, x, y)
-				err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
+				err = pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
 				if err != nil {
 					logger.Fatalf("Failed to extract, %v", err)
 				}
