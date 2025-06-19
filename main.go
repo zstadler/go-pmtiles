@@ -5,9 +5,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -62,6 +64,7 @@ var cli struct {
 		Region          string  `help:"local GeoJSON Polygon or MultiPolygon file for area of interest" type:"existingfile"`
 		Bbox            string  `help:"bbox area of interest: min_lon,min_lat,max_lon,max_lat" type:"string"`
 		Tile            string  `help:"Tile ID of the area of interest: Zoom,X,Y" type:"string"`
+		Slice           bool    `help:"Slice output files at --minzooom. --output is a template with $Z,$X,$Y"`
 		Minzoom         int8    `default:"-1" help:"Minimum zoom level, inclusive"`
 		Maxzoom         int8    `default:"-1" help:"Maximum zoom level, inclusive"`
 		DownloadThreads int     `default:"4" help:"Number of download threads"`
@@ -175,9 +178,30 @@ func main() {
 			logger.Fatal(startHTTPServer(cli.Serve.Interface+":"+strconv.Itoa(cli.Serve.Port), mux))
 		}
 	case "extract <input> <output>":
-		err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
-		if err != nil {
-			logger.Fatalf("Failed to extract, %v", err)
+		if cli.Extract.Slice {
+			if cli.Extract.Region != "" || cli.Extract.Bbox != "" || cli.Extract.Tile != "" {
+				logger.Fatalf("Only one of slice, region, bbox, and tile can be specified")
+			}
+
+		numtiles := int(math.Pow(2, float64(cli.Extract.Minzoom)))
+		outputZ := strings.ReplaceAll(cli.Extract.Output, "$Z", strconv.Itoa(int(cli.Extract.Minzoom)))
+		for x := 0; x < numtiles; x++ {
+			outputZX := strings.ReplaceAll(outputZ, "$X", strconv.Itoa(x))
+			for y := 0; y < numtiles; y++ {
+				outputZXY := strings.ReplaceAll(outputZX, "$Y", strconv.Itoa(y))
+				tile := fmt.Sprintf("%d,%d,%d", cli.Extract.Minzoom, x, y)
+				err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
+				if err != nil {
+					logger.Fatalf("Failed to extract, %v", err)
+				}
+			}
+		}
+
+		} else {
+			err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
+			if err != nil {
+				logger.Fatalf("Failed to extract, %v", err)
+			}
 		}
 	case "cluster <input>":
 		err := pmtiles.Cluster(logger, cli.Cluster.Input, !cli.Cluster.NoDeduplication)

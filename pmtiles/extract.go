@@ -297,7 +297,7 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 	header, err := DeserializeHeader(b[0:HeaderV3LenBytes])
 
 	if !header.Clustered {
-		return fmt.Errorf("source archive must be clustered for extracts")
+		return fmt.Errorf("Source archive must be clustered for extracts")
 	}
 
 	sourceMetadataOffset := header.MetadataOffset
@@ -317,25 +317,25 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 
 	if tileStr != "" {
 		if regionFile != "" || bbox != "" {
-			return fmt.Errorf("cannot specify --tile with --region or --bbox")
+			return fmt.Errorf("Only one of region, bbox, and tile can be specified")
 		}
 
 		parts := strings.Split(tileStr, ",")
 		if len(parts) != 3 {
-			return fmt.Errorf("invalid tile format. Expected Z,X,Y (e.g., 6,18,25)")
+			return fmt.Errorf("Invalid tile format. Expected Z,X,Y (e.g., 6,18,25)")
 		}
 
 		z, err := strconv.ParseUint(parts[0], 10, 8)
 		if err != nil {
-			return fmt.Errorf("invalid zoom level in tile: %w", err)
+			return fmt.Errorf("Invalid zoom level in tile: %w", err)
 		}
 		x, err := strconv.ParseUint(parts[1], 10, 32)
 		if err != nil {
-			return fmt.Errorf("invalid X coordinate in tile: %w", err)
+			return fmt.Errorf("Invalid X coordinate in tile: %w", err)
 		}
 		y, err := strconv.ParseUint(parts[2], 10, 32)
 		if err != nil {
-			return fmt.Errorf("invalid Y coordinate in tile: %w", err)
+			return fmt.Errorf("Invalid Y coordinate in tile: %w", err)
 		}
 
 		// Calculate the bounding box for the given tile
@@ -345,7 +345,7 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 	var relevantSet *roaring64.Bitmap
 	if regionFile != "" || bbox != "" {
 		if regionFile != "" && bbox != "" {
-			return fmt.Errorf("only one of region and bbox can be specified")
+			return fmt.Errorf("Only one of region and bbox can be specified")
 		}
 
 		var multipolygon orb.MultiPolygon
@@ -411,7 +411,7 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 
 	overfetchLeaves, _ := MergeRanges(leafRanges, overfetch)
 	numOverfetchLeaves := overfetchLeaves.Len()
-	fmt.Printf("fetching %d dirs, %d chunks, %d requests\n", len(leaves), len(leafRanges), overfetchLeaves.Len())
+	fmt.Printf("Fetching %d dirs, %d chunks, %d requests\n", len(leaves), len(leafRanges), overfetchLeaves.Len())
 
 	for {
 		if overfetchLeaves.Len() == 0 {
@@ -460,7 +460,7 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 	overfetchRanges, totalBytes := MergeRanges(tileParts, overfetch)
 
 	numOverfetchRanges := overfetchRanges.Len()
-	fmt.Printf("fetching %d tiles, %d chunks, %d requests\n", len(reencoded), len(tileParts), overfetchRanges.Len())
+	fmt.Printf("Fetching %d tiles, %d chunks, %d requests\n", len(reencoded), len(tileParts), overfetchRanges.Len())
 
 	// TODO: takes up too much RAM
 	// construct the directories
