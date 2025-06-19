@@ -64,7 +64,7 @@ var cli struct {
 		Region          string  `help:"local GeoJSON Polygon or MultiPolygon file for area of interest" type:"existingfile"`
 		Bbox            string  `help:"bbox area of interest: min_lon,min_lat,max_lon,max_lat" type:"string"`
 		Tile            string  `help:"Tile ID of the area of interest: Zoom,X,Y" type:"string"`
-		Slice           bool    `help:"Slice output files at --minzooom. --output is a template with $Z,$X,$Y"`
+		Slice           bool    `help:"Slice output files at --minzooom. --output is a template with {x},{y} and optional {z}"`
 		Minzoom         int8    `default:"-1" help:"Minimum zoom level, inclusive"`
 		Maxzoom         int8    `default:"-1" help:"Maximum zoom level, inclusive"`
 		DownloadThreads int     `default:"4" help:"Number of download threads"`
@@ -184,11 +184,11 @@ func main() {
 			}
 
 		numtiles := int(math.Pow(2, float64(cli.Extract.Minzoom)))
-		outputZ := strings.ReplaceAll(cli.Extract.Output, "$Z", strconv.Itoa(int(cli.Extract.Minzoom)))
+		outputZ := strings.ReplaceAll(cli.Extract.Output, "{z}", strconv.Itoa(int(cli.Extract.Minzoom)))
 		for x := 0; x < numtiles; x++ {
-			outputZX := strings.ReplaceAll(outputZ, "$X", strconv.Itoa(x))
+			outputZX := strings.ReplaceAll(outputZ, "{x}", strconv.Itoa(x))
 			for y := 0; y < numtiles; y++ {
-				outputZXY := strings.ReplaceAll(outputZX, "$Y", strconv.Itoa(y))
+				outputZXY := strings.ReplaceAll(outputZX, "{y}", strconv.Itoa(y))
 				dir := filepath.Dir(outputZXY)
 				err := os.MkdirAll(dir, 0755)
 				if err != nil {
