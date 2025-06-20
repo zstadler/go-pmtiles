@@ -14,6 +14,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/schollz/progressbar/v3"
 
 	"github.com/protomaps/go-pmtiles/pmtiles"
 	_ "gocloud.dev/blob/azureblob"
@@ -182,28 +183,36 @@ func main() {
 			if cli.Extract.Region != "" || cli.Extract.Bbox != "" || cli.Extract.Tile != "" {
 				logger.Fatalf("Only one of slice, region, bbox, and tile can be specified")
 			}
-
-		numtiles := int(math.Pow(2, float64(cli.Extract.Minzoom)))
-		outputZ := strings.ReplaceAll(cli.Extract.Output, "{z}", strconv.Itoa(int(cli.Extract.Minzoom)))
-		for x := 0; x < numtiles; x++ {
-			outputZX := strings.ReplaceAll(outputZ, "{x}", strconv.Itoa(x))
-			for y := 0; y < numtiles; y++ {
-				outputZXY := strings.ReplaceAll(outputZX, "{y}", strconv.Itoa(y))
-				dir := filepath.Dir(outputZXY)
-				err := os.MkdirAll(dir, 0755)
-				if err != nil {
-					logger.Fatalf("Error creating directory '%s': %v\n", dir, err)
-				}
-				tile := fmt.Sprintf("%d,%d,%d", cli.Extract.Minzoom, x, y)
-				err = pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
-				if err != nil {
-					logger.Fatalf("Failed to extract, %v", err)
+			numtiles := int(math.Pow(2, float64(cli.Extract.Minzoom)))
+			bar := progressbar.NewOptions64(
+				int64(numtiles)*int64(numtiles),
+				progressbar.OptionSetDescription("Slicing"),
+				progressbar.OptionSetItsString("files"),
+				progressbar.OptionShowCount(),
+				progressbar.OptionShowIts(),
+				progressbar.OptionShowElapsedTimeOnFinish(),
+			)
+			outputZ := strings.ReplaceAll(cli.Extract.Output, "{z}", strconv.Itoa(int(cli.Extract.Minzoom)))
+			for x := 0; x < numtiles; x++ {
+				outputZX := strings.ReplaceAll(outputZ, "{x}", strconv.Itoa(x))
+				for y := 0; y < numtiles; y++ {
+					outputZXY := strings.ReplaceAll(outputZX, "{y}", strconv.Itoa(y))
+					dir := filepath.Dir(outputZXY)
+					err := os.MkdirAll(dir, 0755)
+					if err != nil {
+						logger.Fatalf("Error creating directory '%s': %v\n", dir, err)
+					}
+					tile := fmt.Sprintf("%d,%d,%d", cli.Extract.Minzoom, x, y)
+					err = pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun, true)
+					bar.Add(1)
+					if err != nil {
+						logger.Fatalf("Failed to extract, %v", err)
+					}
 				}
 			}
-		}
-
+			fmt.Println()
 		} else {
-			err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
+			err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun, false)
 			if err != nil {
 				logger.Fatalf("Failed to extract, %v", err)
 			}

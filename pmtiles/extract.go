@@ -265,7 +265,7 @@ func ZxyToBBox(z uint8, x uint32, y uint32, maxzoom uint8) string {
 // 9. get and write the metadata.
 // 10. write the leaf directories (if any)
 // 11. Get all tiles, and write directly to the output.
-func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool) error {
+func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool, quite bool) error {
 	// 1. fetch the header
 	start := time.Now()
 	ctx := context.Background()
@@ -411,7 +411,9 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 
 	overfetchLeaves, _ := MergeRanges(leafRanges, overfetch)
 	numOverfetchLeaves := overfetchLeaves.Len()
-	fmt.Printf("Fetching %d dirs, %d chunks, %d requests\n", len(leaves), len(leafRanges), overfetchLeaves.Len())
+	if ! quite {
+        	fmt.Printf("Fetching %d dirs, %d chunks, %d requests\n", len(leaves), len(leafRanges), overfetchLeaves.Len())
+	}
 
 	for {
 		if overfetchLeaves.Len() == 0 {
@@ -451,7 +453,9 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 		return tileEntries[i].TileID < tileEntries[j].TileID
 	})
 
-	fmt.Printf("Region tiles %d, result tile entries %d\n", relevantSet.GetCardinality(), len(tileEntries))
+	if ! quite {
+        	fmt.Printf("Region tiles %d, result tile entries %d\n", relevantSet.GetCardinality(), len(tileEntries))
+	}
 
 	// 6. create the new header and chunk list
 	// we now need to re-encode this entry list using cumulative offsets
@@ -460,7 +464,9 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 	overfetchRanges, totalBytes := MergeRanges(tileParts, overfetch)
 
 	numOverfetchRanges := overfetchRanges.Len()
-	fmt.Printf("Fetching %d tiles, %d chunks, %d requests\n", len(reencoded), len(tileParts), overfetchRanges.Len())
+	if ! quite {
+        	fmt.Printf("Fetching %d tiles, %d chunks, %d requests\n", len(reencoded), len(tileParts), overfetchRanges.Len())
+	}
 
 	// TODO: takes up too much RAM
 	// construct the directories
@@ -530,10 +536,13 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 			return err
 		}
 
-		bar := progressbar.DefaultBytes(
-			int64(totalBytes),
-			"fetching chunks",
-		)
+		bar := io.Discard
+		if ! quite {
+			bar = progressbar.DefaultBytes(
+				int64(totalBytes),
+				"fetching chunks",
+			)
+		}
 
 		var mu sync.Mutex
 
@@ -596,13 +605,15 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 		}
 	}
 
-	fmt.Printf("Completed in %v with %v download threads (%v tiles/s).\n", time.Since(start), downloadThreads, float64(len(reencoded))/float64(time.Since(start).Seconds()))
-	totalRequests := 2                  // header + root
-	totalRequests += numOverfetchLeaves // leaves
-	totalRequests++                     // metadata
-	totalRequests += numOverfetchRanges
-	fmt.Printf("Extract required %d total requests.\n", totalRequests)
-	fmt.Printf("Extract transferred %s (overfetch %v) for an archive size of %s\n", humanize.Bytes(totalBytes), overfetch, humanize.Bytes(totalActualBytes))
+	if ! quite {
+        	fmt.Printf("Completed in %v with %v download threads (%v tiles/s).\n", time.Since(start), downloadThreads, float64(len(reencoded))/float64(time.Since(start).Seconds()))
+		totalRequests := 2                  // header + root
+		totalRequests += numOverfetchLeaves // leaves
+		totalRequests++                     // metadata
+		totalRequests += numOverfetchRanges
+        	fmt.Printf("Extract required %d total requests.\n", totalRequests)
+        	fmt.Printf("Extract transferred %s (overfetch %v) for an archive size of %s\n", humanize.Bytes(totalBytes), overfetch, humanize.Bytes(totalActualBytes))
+	}
 
 	return nil
 }
