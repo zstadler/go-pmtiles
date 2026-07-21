@@ -1,13 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
-	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/schollz/progressbar/v3"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/protomaps/go-pmtiles/pmtiles"
 	_ "gocloud.dev/blob/azureblob"
@@ -27,6 +30,11 @@ var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
+
+	extractGroup singleflight.Group
+
+	maxZoomRegex = regexp.MustCompile(`^/([^/]+)-(\d+)\.pmtiles$`)
+	minZoomRegex = regexp.MustCompile(`^/([^/]+)\+(\d+)-(\d+)-(\d+)\.pmtiles$`)
 )
 
 var cli struct {
@@ -113,6 +121,14 @@ var cli struct {
 		PublicURL string `help:"Public base URL of tile endpoint for TileJSON e.g. https://example.com/tiles/"`
 	} `cmd:"" help:"Run an HTTP proxy server for Z/X/Y tiles"`
 
+	ServeExtract struct {
+		SourceDir string `arg:"" help:"Directory containing source PMTiles archives" type:"existingdir"`
+		CacheDir  string `arg:"" help:"Directory to store extracted PMTiles caches" type:"existingdir"`
+		Interface string `default:"0.0.0.0"`
+		Port      int    `default:"8080"`
+		Cors      string `help:"Comma-separated list of allowed HTTP CORS origins"`
+	} `cmd:"" help:"Run an HTTP server that performs on-demand slicing of PMTiles sources"`
+
 	Upload struct {
 		InputPmtiles   string `arg:"" type:"existingfile" help:"The local PMTiles file"`
 		RemotePmtiles  string `arg:""  help:"The name for the remote PMTiles source"`
@@ -177,6 +193,20 @@ func main() {
 			logger.Fatal(startHTTPServer(cli.Serve.Interface+":"+strconv.Itoa(cli.Serve.Port), muxWithCors))
 		} else {
 			logger.Fatal(startHTTPServer(cli.Serve.Interface+":"+strconv.Itoa(cli.Serve.Port), mux))
+		}
+	case "serve-extract <source-dir> <cache-dir>":
+		pmtiles.SetBuildInfo(version, commit, date)
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", ExtractServeHandler(cli.ServeExtract.CacheDir, cli.ServeExtract.SourceDir))
+
+		logger.Printf("Serving extracts from %s to %s on port %d and interface %s with Access-Control-Allow-Origin: %s\n", cli.ServeExtract.SourceDir, cli.ServeExtract.CacheDir, cli.ServeExtract.Port, cli.ServeExtract.Interface, cli.ServeExtract.Cors)
+		
+		if cli.ServeExtract.Cors != "" {
+			muxWithCors := pmtiles.NewCors(cli.ServeExtract.Cors).Handler(mux)
+			logger.Fatal(startHTTPServer(cli.ServeExtract.Interface+":"+strconv.Itoa(cli.ServeExtract.Port), muxWithCors))
+		} else {
+			logger.Fatal(startHTTPServer(cli.ServeExtract.Interface+":"+strconv.Itoa(cli.ServeExtract.Port), mux))
 		}
 	case "extract <input> <output>":
 		if cli.Extract.Slice {
@@ -286,8 +316,8 @@ func main() {
 	default:
 		panic(ctx.Command())
 	}
-
 }
+
 func startHTTPServer(addr string, handler http.Handler) error {
 	server := &http.Server{
 		ReadTimeout:       10 * time.Second,
@@ -298,4 +328,151 @@ func startHTTPServer(addr string, handler http.Handler) error {
 		Handler:           handler,
 	}
 	return server.ListenAndServe()
+}
+
+func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
+	// os.SameFile compares underlying inodes and device IDs, guaranteeing detection of overlap
+	// even when different host volume aliases are mounted to the container. This prevents 
+	// accidental overwrite of source files.
+	sourceStat, errSrc := os.Stat(sourceDir)
+	cacheStat, errCache := os.Stat(baseCacheDir)
+	if errSrc == nil && errCache == nil && os.SameFile(sourceStat, cacheStat) {
+		log.Fatalf("FATAL: sourceDir and baseCacheDir point to the same underlying directory. This must be separated to prevent data destruction.")
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		var archiveName string
+		var minZoom, maxZoom int8
+		var tileStr string
+		var cachePath string
+
+		if m := maxZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
+			archiveName = filepath.Base(m[1])
+			if archiveName == "." || archiveName == "/" || archiveName == "\\" {
+				http.Error(w, "Invalid archive name", http.StatusBadRequest)
+				return
+			}
+			
+			parsedMax, err := strconv.ParseInt(m[2], 10, 8)
+			if err != nil || parsedMax < 0 || parsedMax > 24 {
+				http.Error(w, "Invalid maximum zoom level", http.StatusBadRequest)
+				return
+			}
+			
+			maxZoom = int8(parsedMax)
+			minZoom = 0
+			tileStr = ""
+			cachePath = fmt.Sprintf("%s-%d.pmtiles", archiveName, maxZoom)
+
+		} else if m := minZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
+			archiveName = filepath.Base(m[1])
+			if archiveName == "." || archiveName == "/" || archiveName == "\\" {
+				http.Error(w, "Invalid archive name", http.StatusBadRequest)
+				return
+			}
+
+			parsedZ, err := strconv.ParseInt(m[2], 10, 8)
+			if err != nil || parsedZ < 0 || parsedZ > 24 {
+				http.Error(w, "Invalid zoom level", http.StatusBadRequest)
+				return
+			}
+			z := int8(parsedZ)
+
+			x, _ := strconv.ParseInt(m[3], 10, 64)
+			y, _ := strconv.ParseInt(m[4], 10, 64)
+
+			limit := int64(1 << z)
+			if x < 0 || x >= limit || y < 0 || y >= limit {
+				http.Error(w, "Coordinates out of bounds for given zoom level", http.StatusBadRequest)
+				return
+			}
+
+			minZoom = z
+			maxZoom = z
+			tileStr = fmt.Sprintf("%d/%d/%d", z, x, y)
+			cachePath = fmt.Sprintf("%s+%d-%d-%d.pmtiles", archiveName, z, x, y)
+
+		} else {
+			http.NotFound(w, r)
+			return
+		}
+
+		sourceFile := filepath.Join(sourceDir, archiveName+".pmtiles")
+		cacheFile := filepath.Join(baseCacheDir, cachePath)
+		
+		serveExtracted(w, r, sourceFile, baseCacheDir, cacheFile, minZoom, maxZoom, tileStr)
+	}
+}
+
+func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, baseCacheDir, cacheFile string, minZoom, maxZoom int8, tileStr string) {
+	for {
+		if f, err := os.Open(cacheFile); err == nil {
+			stat, err := f.Stat()
+			if err == nil {
+				defer f.Close()
+				http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
+				return
+			}
+			f.Close()
+		}
+
+		// singleflight prevents cache stampedes for the same extraction parameters
+		_, err, _ := extractGroup.Do(cacheFile, func() (interface{}, error) {
+			if _, err := os.Stat(cacheFile); err == nil {
+				return nil, nil
+			}
+
+			tmpFile, err := os.CreateTemp(baseCacheDir, "pmtiles-extract-*.tmp")
+			if err != nil {
+				return nil, fmt.Errorf("failed to create temporary file: %w", err)
+			}
+			tempName := tmpFile.Name()
+			
+			tmpFile.Close() 
+			defer os.Remove(tempName)
+
+			err = pmtiles.Extract(
+				nil,
+				sourceFile,
+				"",
+				minZoom,
+				maxZoom,
+				"",
+				"",
+				tileStr,
+				tempName,
+				4,
+				0.2,
+				false,
+				true,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("extraction failed: %w", err)
+			}
+
+			targetDir := filepath.Dir(cacheFile)
+
+			if err := os.MkdirAll(targetDir, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create target cache directories: %w", err)
+			}
+
+			if err := os.Rename(tempName, cacheFile); err != nil {
+				return nil, fmt.Errorf("failed to atomically finalize cache file: %w", err)
+			}
+
+			return nil, nil
+		})
+
+		if err != nil {
+			// Defends against TOCTOU race condition if source file is deleted/moved prior to extraction
+			if errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "Source archive not found", http.StatusNotFound)
+				return
+			}
+			
+			log.Printf("Error serving extract for %s: %v", cacheFile, err)
+			http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
+			return
+		}
+	}
 }
