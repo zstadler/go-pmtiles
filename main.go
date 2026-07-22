@@ -346,25 +346,7 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 		var tileStr string
 		var cachePath string
 
-		if m := maxZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
-			archiveName = filepath.Base(m[1])
-			if archiveName == "." || archiveName == "/" || archiveName == "\\" {
-				http.Error(w, "Invalid archive name", http.StatusBadRequest)
-				return
-			}
-			
-			parsedMax, err := strconv.ParseInt(m[2], 10, 8)
-			if err != nil || parsedMax < 0 || parsedMax > 24 {
-				http.Error(w, "Invalid maximum zoom level", http.StatusBadRequest)
-				return
-			}
-			
-			maxZoom = int8(parsedMax)
-			minZoom = 0
-			tileStr = ""
-			cachePath = fmt.Sprintf("%s-%d.pmtiles", archiveName, maxZoom)
-
-		} else if m := minZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
+		if m := minZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
 			archiveName = filepath.Base(m[1])
 			if archiveName == "." || archiveName == "/" || archiveName == "\\" {
 				http.Error(w, "Invalid archive name", http.StatusBadRequest)
@@ -391,6 +373,24 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 			maxZoom = z
 			tileStr = fmt.Sprintf("%d/%d/%d", z, x, y)
 			cachePath = fmt.Sprintf("%s+%d-%d-%d.pmtiles", archiveName, z, x, y)
+
+		} else if m := maxZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
+			archiveName = filepath.Base(m[1])
+			if archiveName == "." || archiveName == "/" || archiveName == "\\" {
+				http.Error(w, "Invalid archive name", http.StatusBadRequest)
+				return
+			}
+			
+			parsedMax, err := strconv.ParseInt(m[2], 10, 8)
+			if err != nil || parsedMax < 0 || parsedMax > 24 {
+				http.Error(w, "Invalid maximum zoom level", http.StatusBadRequest)
+				return
+			}
+			
+			maxZoom = int8(parsedMax)
+			minZoom = 0
+			tileStr = ""
+			cachePath = fmt.Sprintf("%s-%d.pmtiles", archiveName, maxZoom)
 
 		} else {
 			http.NotFound(w, r)
