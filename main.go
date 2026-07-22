@@ -371,7 +371,7 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 
 			minZoom = z
 			maxZoom = z
-			tileStr = fmt.Sprintf("%d/%d/%d", z, x, y)
+			tileStr = fmt.Sprintf("%d,%d,%d", z, x, y)
 			cachePath = fmt.Sprintf("%s+%d-%d-%d.pmtiles", archiveName, z, x, y)
 
 		} else if m := maxZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
