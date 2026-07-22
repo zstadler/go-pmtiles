@@ -370,7 +370,7 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 			}
 
 			minZoom = z
-			maxZoom = z
+			maxZoom = 24
 			tileStr = fmt.Sprintf("%d,%d,%d", z, x, y)
 			cachePath = fmt.Sprintf("%s+%d-%d-%d.pmtiles", archiveName, z, x, y)
 
