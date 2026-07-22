@@ -433,8 +433,8 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, baseCach
 
 			err = pmtiles.Extract(
 				nil,
-				sourceFile,
 				"",
+				sourceFile,
 				minZoom,
 				maxZoom,
 				"",
