@@ -38,6 +38,7 @@ const (
 	Jpeg                     = 3
 	Webp                     = 4
 	Avif                     = 5
+	Mlt                      = 6
 )
 
 // HeaderV3LenBytes is the fixed-size binary header size.
@@ -97,6 +98,8 @@ func headerContentType(header HeaderV3) (string, bool) {
 		return "image/webp", true
 	case Avif:
 		return "image/avif", true
+	case Mlt:
+		return "application/vnd.maplibre-tile", true
 	default:
 		return "", false
 	}
@@ -114,6 +117,8 @@ func tileTypeToString(t TileType) string {
 		return "webp"
 	case Avif:
 		return "avif"
+	case Mlt:
+		return "mlt"
 	default:
 		return ""
 	}
@@ -131,6 +136,8 @@ func stringToTileType(t string) TileType {
 		return Webp
 	case "avif":
 		return Avif
+	case "mlt":
+		return Mlt
 	default:
 		return UnknownTileType
 	}
@@ -316,8 +323,6 @@ func SerializeEntries(entries []EntryV3, compression Compression) []byte {
 }
 
 func DeserializeEntries(data *bytes.Buffer, compression Compression) []EntryV3 {
-	entries := make([]EntryV3, 0)
-
 	var reader io.Reader
 
 	if compression == NoCompression {
@@ -330,6 +335,10 @@ func DeserializeEntries(data *bytes.Buffer, compression Compression) []EntryV3 {
 	byteReader := bufio.NewReader(reader)
 
 	numEntries, _ := binary.ReadUvarint(byteReader)
+
+	// Preallocate the entries slice to the known count so the append loops below
+	// do not repeatedly reallocate and copy the backing array as it grows.
+	entries := make([]EntryV3, 0, numEntries)
 
 	lastID := uint64(0)
 	for i := uint64(0); i < numEntries; i++ {
@@ -483,7 +492,7 @@ func buildRootsLeaves(entries []EntryV3, leafSize int, compression Compression) 
 	return rootBytes, leavesBytes, numLeaves
 }
 
-func optimizeDirectories(entries []EntryV3, targetRootLen int, compression Compression) ([]byte, []byte, int) {
+func BuildDirectories(entries []EntryV3, targetRootLen int, compression Compression) ([]byte, []byte, int) {
 	if len(entries) < 16384 {
 		testRootBytes := SerializeEntries(entries, compression)
 		// Case1: the entire directory fits into the target len

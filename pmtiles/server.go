@@ -364,6 +364,10 @@ func (server *Server) getTileAttempt(ctx context.Context, httpHeaders map[string
 		if ext != "avif" {
 			return 400, httpHeaders, []byte("path mismatch: archive is type AVIF (.avif)"), ""
 		}
+	case Mlt:
+		if ext != "mlt" {
+			return 400, httpHeaders, []byte("path mismatch: archive is type MLT (.mlt)"), ""
+		}
 	}
 
 	tileID := ZxyToID(z, x, y)
@@ -522,6 +526,8 @@ func (server *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) int {
 		w.Header().Set(k, v)
 	}
 	if statusCode == 200 {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+
 		lrw := &loggingResponseWriter{w, 200}
 		// handle if-match, if-none-match request headers based on response etag
 		http.ServeContent(

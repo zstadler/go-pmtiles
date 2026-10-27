@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -38,10 +40,12 @@ var (
 )
 
 var cli struct {
+	Quiet bool `help:"Silence logging and progress output" short:"q"`
+
 	Show struct {
 		Path       string `arg:""`
 		Bucket     string `help:"Remote bucket"`
-		Metadata   bool   `help:"Print only the JSON metadata"`
+		Metadata   bool   `help:"Output only the full JSON metadata"`
 		HeaderJson bool   `help:"Print a JSON representation of part of the header information"`
 		Tilejson   bool   `help:"Print the TileJSON"`
 		PublicURL  string `help:"Public base URL of tile endpoint for TileJSON e.g. https://example.com/tiles"`
@@ -63,7 +67,7 @@ var cli struct {
 	Edit struct {
 		Input      string `arg:"" help:"Input archive" type:"existingfile"`
 		HeaderJson string `help:"Input header JSON file (written by show --header-json)" type:"existingfile"`
-		Metadata   string `help:"Input metadata JSON (written by show --metadata)" type:"existingfile"`
+		Metadata   string `help:"Input metadata JSON file (written by show --metadata)" type:"existingfile"`
 	} `cmd:"" help:"Edit JSON metadata or parts of the header"`
 
 	Extract struct {
@@ -82,9 +86,8 @@ var cli struct {
 	} `cmd:"" help:"Create an archive from a larger archive for a subset of zoom levels or geographic region"`
 
 	Merge struct {
-		Output string   `arg:"" help:"Output archive" type:"path"`
-		Input  []string `arg:"" help:"Input archives"`
-	} `cmd:"" help:"Merge multiple archives into a single archive" hidden:""`
+		Archives []string `arg:"" name:"inputs_then_output" help:"One or more disjoint input archives, followed by the output filename."`
+	} `cmd:"" help:"Merge multiple disjoint archives into one: INPUT1.pmtiles INPUT2.pmtiles OUTPUT.pmtiles"`
 
 	Convert struct {
 		Input           string `arg:"" help:"Input archive" type:"existingfile"`
@@ -147,6 +150,9 @@ func main() {
 
 	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
 	ctx := kong.Parse(&cli)
+	if cli.Quiet {
+		logger.SetOutput(io.Discard)
+	}
 
 	switch ctx.Command() {
 	case "show <path>":
@@ -233,7 +239,7 @@ func main() {
 						logger.Fatalf("Error creating directory '%s': %v\n", dir, err)
 					}
 					tile := fmt.Sprintf("%d,%d,%d", cli.Extract.Minzoom, x, y)
-					err = pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun, true)
+					err = pmtiles.Extract(context.Background(), log.New(io.Discard, "", 0), cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, "", "", tile, outputZXY, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
 					bar.Add(1)
 					if err != nil {
 						logger.Fatalf("Failed to extract, %v", err)
@@ -242,7 +248,7 @@ func main() {
 			}
 			fmt.Println()
 		} else {
-			err := pmtiles.Extract(logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun, false)
+			err := pmtiles.Extract(context.Background(), logger, cli.Extract.Bucket, cli.Extract.Input, cli.Extract.Minzoom, cli.Extract.Maxzoom, cli.Extract.Region, cli.Extract.Bbox, cli.Extract.Tile, cli.Extract.Output, cli.Extract.DownloadThreads, cli.Extract.Overfetch, cli.Extract.DryRun)
 			if err != nil {
 				logger.Fatalf("Failed to extract, %v", err)
 			}
@@ -284,6 +290,11 @@ func main() {
 
 		if err != nil {
 			logger.Fatalf("Failed to convert %s, %v", path, err)
+		}
+	case "merge <inputs_then_output>":
+		err := pmtiles.Merge(logger, cli.Merge.Archives)
+		if err != nil {
+			logger.Fatalf("Failed to merge, %v", err)
 		}
 	case "upload <input-pmtiles> <remote-pmtiles>":
 		err := pmtiles.Upload(logger, cli.Upload.InputPmtiles, cli.Upload.Bucket, cli.Upload.RemotePmtiles, cli.Upload.MaxConcurrency)
@@ -432,7 +443,8 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, baseCach
 			defer os.Remove(tempName)
 
 			err = pmtiles.Extract(
-				nil,
+				context.Background(),
+				log.New(io.Discard, "", 0),
 				"",
 				sourceFile,
 				minZoom,
@@ -444,7 +456,6 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, baseCach
 				4,
 				0.2,
 				false,
-				true,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("extraction failed: %w", err)

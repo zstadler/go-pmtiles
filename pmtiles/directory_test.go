@@ -4,8 +4,59 @@ import (
 	"bytes"
 	"github.com/stretchr/testify/assert"
 	"math/rand"
+	"sort"
 	"testing"
 )
+
+func fakeArchive(header HeaderV3, metadata map[string]interface{}, tiles map[Zxy][]byte, leaves bool, internalCompression Compression) []byte {
+	byTileID := make(map[uint64][]byte)
+	keys := make([]uint64, 0, len(tiles))
+	for zxy, bytes := range tiles {
+		header.MaxZoom = max(header.MaxZoom, zxy.Z)
+		id := ZxyToID(zxy.Z, zxy.X, zxy.Y)
+		byTileID[id] = bytes
+		keys = append(keys, id)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	resolver := newResolver(false, false)
+	tileDataBytes := make([]byte, 0)
+	for _, id := range keys {
+		tileBytes := byTileID[id]
+		resolver.AddTileIsNew(id, tileBytes, 1)
+		tileDataBytes = append(tileDataBytes, tileBytes...)
+	}
+
+	metadataBytes, _ := SerializeMetadata(metadata, internalCompression)
+	var rootBytes []byte
+	var leavesBytes []byte
+	if leaves {
+		rootBytes, leavesBytes, _ = buildRootsLeaves(resolver.Entries, 1, internalCompression)
+	} else {
+		rootBytes = SerializeEntries(resolver.Entries, internalCompression)
+		leavesBytes = make([]byte, 0)
+	}
+
+	header.InternalCompression = internalCompression
+	if header.TileType == Mvt {
+		header.TileCompression = Gzip
+	}
+
+	header.RootOffset = HeaderV3LenBytes
+	header.RootLength = uint64(len(rootBytes))
+	header.MetadataOffset = header.RootOffset + header.RootLength
+	header.MetadataLength = uint64(len(metadataBytes))
+	header.LeafDirectoryOffset = header.MetadataOffset + header.MetadataLength
+	header.LeafDirectoryLength = uint64(len(leavesBytes))
+	header.TileDataOffset = header.LeafDirectoryOffset + header.LeafDirectoryLength
+	header.TileDataLength = resolver.Offset
+
+	archiveBytes := SerializeHeader(header)
+	archiveBytes = append(archiveBytes, rootBytes...)
+	archiveBytes = append(archiveBytes, metadataBytes...)
+	archiveBytes = append(archiveBytes, leavesBytes...)
+	archiveBytes = append(archiveBytes, tileDataBytes...)
+	return archiveBytes
+}
 
 func TestDirectoryRoundtrip(t *testing.T) {
 	entries := make([]EntryV3, 0)
@@ -133,7 +184,7 @@ func TestOptimizeDirectories(t *testing.T) {
 	rand.Seed(3857)
 	entries := make([]EntryV3, 0)
 	entries = append(entries, EntryV3{0, 0, 100, 1})
-	_, leavesBytes, numLeaves := optimizeDirectories(entries, 100, Gzip)
+	_, leavesBytes, numLeaves := BuildDirectories(entries, 100, Gzip)
 	assert.False(t, len(leavesBytes) > 0)
 	assert.Equal(t, 0, numLeaves)
 
@@ -146,7 +197,7 @@ func TestOptimizeDirectories(t *testing.T) {
 		offset += uint64(randtilesize)
 	}
 
-	rootBytes, leavesBytes, numLeaves := optimizeDirectories(entries, 1024, Gzip)
+	rootBytes, leavesBytes, numLeaves := BuildDirectories(entries, 1024, Gzip)
 
 	assert.False(t, len(rootBytes) > 1024)
 
@@ -224,6 +275,7 @@ func TestStringifiedExtension(t *testing.T) {
 	assert.Equal(t, ".jpg", headerExt(HeaderV3{TileType: Jpeg}))
 	assert.Equal(t, ".webp", headerExt(HeaderV3{TileType: Webp}))
 	assert.Equal(t, ".avif", headerExt(HeaderV3{TileType: Avif}))
+	assert.Equal(t, ".mlt", headerExt(HeaderV3{TileType: Mlt}))
 }
 
 func TestStringToTileType(t *testing.T) {
@@ -232,6 +284,7 @@ func TestStringToTileType(t *testing.T) {
 	assert.Equal(t, "jpg", tileTypeToString(stringToTileType("jpg")))
 	assert.Equal(t, "webp", tileTypeToString(stringToTileType("webp")))
 	assert.Equal(t, "avif", tileTypeToString(stringToTileType("avif")))
+	assert.Equal(t, "mlt", tileTypeToString(stringToTileType("mlt")))
 	assert.Equal(t, "", tileTypeToString(stringToTileType("")))
 }
 

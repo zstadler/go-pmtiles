@@ -44,6 +44,13 @@ func TestNormalizeHttp(t *testing.T) {
 	assert.Equal(t, "http://example.com/foo", bucket)
 }
 
+func TestNormalizeHttpWithQuery(t *testing.T) {
+	url := "http://example.com/foo/bar.pmtiles?X-Goog-Algorithm=GOOG4&X-Goog-Signature=abc123"
+	bucket, key, _ := NormalizeBucketKey("", "", url)
+	assert.Equal(t, "http://example.com/foo", bucket)
+	assert.Equal(t, "bar.pmtiles?X-Goog-Algorithm=GOOG4&X-Goog-Signature=abc123", key)
+}
+
 func TestNormalizePathPrefixServer(t *testing.T) {
 	bucket, key, _ := NormalizeBucketKey("", "../foo", "")
 	assert.Equal(t, "", key)

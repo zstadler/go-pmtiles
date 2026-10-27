@@ -1,8 +1,14 @@
-FROM golang:1.23-alpine3.19 AS builder
+FROM golang:1.25-alpine AS builder
 COPY . /workspace
 WORKDIR /workspace
 ENV CGO_ENABLED=0
-RUN go build -o /workspace/go-pmtiles
+ARG VERSION
+RUN go build \
+  -trimpath \
+  -ldflags "\
+    -s -w \
+    -X main.version=${VERSION}" \
+  -o /workspace/go-pmtiles
 FROM gcr.io/distroless/static
 COPY --from=builder /workspace/go-pmtiles /go-pmtiles
 EXPOSE 8080

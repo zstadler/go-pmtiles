@@ -9,7 +9,6 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/maptile"
-	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/errgroup"
 	"io"
 	"io/ioutil"
@@ -147,7 +146,7 @@ type overfetchListItem struct {
 	index        int
 }
 
-// MergeRanges takes a slice of SrcDstRanges, that:
+// mergeRanges takes a slice of SrcDstRanges, that:
 // * is non-contiguous, and is sorted by DstOffset
 // * an Overfetch parameter
 //   - overfetch = 0.2 means we can request an extra 20%
@@ -159,7 +158,7 @@ type overfetchListItem struct {
 //	input ranges are merged in order of smallest byte distance to next range
 //	until the overfetch budget is consumed.
 //	The list is sorted by Length
-func MergeRanges(ranges []srcDstRange, overfetch float32) (*list.List, uint64) {
+func mergeRanges(ranges []srcDstRange, overfetch float32) (*list.List, uint64) {
 	totalSize := 0
 
 	shortest := make([]*overfetchListItem, len(ranges))
@@ -240,12 +239,8 @@ func MergeRanges(ranges []srcDstRange, overfetch float32) (*list.List, uint64) {
 // ZxyToBBox converts Z, X, Y tile coordinates to a geographic bounding box.
 // The bounding box is shrunk based on maxzoom to prevent rounding from exceeding the boundaries.
 func ZxyToBBox(z uint8, x uint32, y uint32, maxzoom uint8) string {
-	// This uses the orb.maptile package to get the tile bounds.
-	// We need to convert from our Z,X,Y to maptile.Tile
 	tile := maptile.New(x, y, maptile.Zoom(z))
-	// Set the buffer size to a maxzoom+4 tile width 
 	bufferSize := -360 / math.Pow(2, float64(maxzoom)+4)
-	// Negative pad performs a shrink on the tile bounds
 	tileBounds := tile.Bound().Pad(bufferSize)
 	return fmt.Sprintf("%f,%f,%f,%f", tileBounds.Left(), tileBounds.Bottom(), tileBounds.Right(), tileBounds.Top())
 }
@@ -259,16 +254,19 @@ func ZxyToBBox(z uint8, x uint32, y uint32, maxzoom uint8) string {
 //   - a new total directory (root + leaf directories)
 //   - a sorted slice of byte ranges in the old file required
 //
-// 6. Merge requested ranges using an overfetch parameter
+// 6. Merge requested ranges using an overfetch parametter
 // 7. write the modified header
 // 8. write the root directory.
 // 9. get and write the metadata.
 // 10. write the leaf directories (if any)
 // 11. Get all tiles, and write directly to the output.
-func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool, quite bool) error {
+func Extract(ctx context.Context, logger *log.Logger, bucketURL string, key string, minzoom int8, maxzoom int8, regionFile string, bbox string, tileStr string, output string, downloadThreads int, overfetch float32, dryRun bool) error {
 	// 1. fetch the header
 	start := time.Now()
-	ctx := context.Background()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	bucketURL, key, err := NormalizeBucketKey(bucketURL, "", key)
 
@@ -297,7 +295,7 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 	header, err := DeserializeHeader(b[0:HeaderV3LenBytes])
 
 	if !header.Clustered {
-		return fmt.Errorf("Source archive must be clustered for extracts")
+		return fmt.Errorf("source archive must be clustered for extracts")
 	}
 
 	sourceMetadataOffset := header.MetadataOffset
@@ -319,12 +317,10 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 		if regionFile != "" || bbox != "" {
 			return fmt.Errorf("Only one of region, bbox, and tile can be specified")
 		}
-
 		parts := strings.Split(tileStr, ",")
 		if len(parts) != 3 {
 			return fmt.Errorf("Invalid tile format. Expected Z,X,Y (e.g., 6,18,25)")
 		}
-
 		z, err := strconv.ParseUint(parts[0], 10, 8)
 		if err != nil {
 			return fmt.Errorf("Invalid zoom level in tile: %w", err)
@@ -337,48 +333,72 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 		if err != nil {
 			return fmt.Errorf("Invalid Y coordinate in tile: %w", err)
 		}
-
-		// Calculate the bounding box for the given tile
 		bbox = ZxyToBBox(uint8(z), uint32(x), uint32(y), uint8(maxzoom))
 	}
 
 	var relevantSet *roaring64.Bitmap
 	if regionFile != "" || bbox != "" {
 		if regionFile != "" && bbox != "" {
-			return fmt.Errorf("Only one of region and bbox can be specified")
+			return fmt.Errorf("only one of region and bbox can be specified")
 		}
 
 		var multipolygon orb.MultiPolygon
+		var centerLon, centerLat float64
 
 		if regionFile != "" {
 			dat, _ := ioutil.ReadFile(regionFile)
 			multipolygon, err = UnmarshalRegion(dat)
+			if err != nil {
+				return err
+			}
 
-			if err != nil {
-				return err
-			}
+			bound := multipolygon.Bound()
+			centerLon = bound.Center().X()
+			centerLat = bound.Center().Y()
 		} else {
-			multipolygon, err = BboxRegion(bbox)
+			parts := strings.Split(bbox, ",")
+			minLon, err := strconv.ParseFloat(parts[0], 64)
 			if err != nil {
-				return err
+				return fmt.Errorf("invalid bbox: %w", err)
 			}
+			minLat, err := strconv.ParseFloat(parts[1], 64)
+			if err != nil {
+				return fmt.Errorf("invalid bbox: %w", err)
+			}
+			maxLon, err := strconv.ParseFloat(parts[2], 64)
+			if err != nil {
+				return fmt.Errorf("invalid bbox: %w", err)
+			}
+			maxLat, err := strconv.ParseFloat(parts[3], 64)
+			if err != nil {
+				return fmt.Errorf("invalid bbox: %w", err)
+			}
+
+			multipolygon = bboxToMultiPolygon(minLon, minLat, maxLon, maxLat)
+
+			centerLon = (minLon + maxLon) / 2
+			if minLon > maxLon {
+				centerLon = (minLon + maxLon + 360) / 2
+				if centerLon > 180 {
+					centerLon -= 360
+				}
+			}
+			centerLat = (minLat + maxLat) / 2
 		}
 
-		// 2. construct a relevance bitmap
-
 		bound := multipolygon.Bound()
-
-		boundarySet, interiorSet := bitmapMultiPolygon(uint8(maxzoom), multipolygon)
-		relevantSet = boundarySet
-		relevantSet.Or(interiorSet)
-		generalizeOr(relevantSet, uint8(minzoom))
-
 		header.MinLonE7 = int32(bound.Left() * 10000000)
 		header.MinLatE7 = int32(bound.Bottom() * 10000000)
 		header.MaxLonE7 = int32(bound.Right() * 10000000)
 		header.MaxLatE7 = int32(bound.Top() * 10000000)
-		header.CenterLonE7 = int32(bound.Center().X() * 10000000)
-		header.CenterLatE7 = int32(bound.Center().Y() * 10000000)
+		header.CenterLonE7 = int32(centerLon * 10000000)
+		header.CenterLatE7 = int32(centerLat * 10000000)
+
+		// 2. construct a relevance bitmap
+		boundarySet, interiorSet := bitmapMultiPolygon(uint8(maxzoom), multipolygon)
+		relevantSet = boundarySet
+		relevantSet.Or(interiorSet)
+		generalizeOr(relevantSet, uint8(minzoom))
 	} else {
 		relevantSet = roaring64.New()
 		relevantSet.AddRange(ZxyToID(uint8(minzoom), 0, 0), ZxyToID(uint8(maxzoom)+1, 0, 0))
@@ -409,11 +429,9 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 		leafRanges = append(leafRanges, srcDstRange{header.LeafDirectoryOffset + leaf.Offset, 0, uint64(leaf.Length)})
 	}
 
-	overfetchLeaves, _ := MergeRanges(leafRanges, overfetch)
+	overfetchLeaves, _ := mergeRanges(leafRanges, overfetch)
 	numOverfetchLeaves := overfetchLeaves.Len()
-	if ! quite {
-        	fmt.Printf("Fetching %d dirs, %d chunks, %d requests\n", len(leaves), len(leafRanges), overfetchLeaves.Len())
-	}
+	logger.Printf("fetching %d dirs, %d chunks, %d requests\n", len(leaves), len(leafRanges), overfetchLeaves.Len())
 
 	for {
 		if overfetchLeaves.Len() == 0 {
@@ -453,24 +471,20 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 		return tileEntries[i].TileID < tileEntries[j].TileID
 	})
 
-	if ! quite {
-        	fmt.Printf("Region tiles %d, result tile entries %d\n", relevantSet.GetCardinality(), len(tileEntries))
-	}
+	logger.Printf("Region tiles %d, result tile entries %d\n", relevantSet.GetCardinality(), len(tileEntries))
 
 	// 6. create the new header and chunk list
 	// we now need to re-encode this entry list using cumulative offsets
 	reencoded, tileParts, tiledataLength, addressedTiles, tileContents := reencodeEntries(tileEntries)
 
-	overfetchRanges, totalBytes := MergeRanges(tileParts, overfetch)
+	overfetchRanges, totalBytes := mergeRanges(tileParts, overfetch)
 
 	numOverfetchRanges := overfetchRanges.Len()
-	if ! quite {
-        	fmt.Printf("Fetching %d tiles, %d chunks, %d requests\n", len(reencoded), len(tileParts), overfetchRanges.Len())
-	}
+	logger.Printf("fetching %d tiles, %d chunks, %d requests\n", len(reencoded), len(tileParts), overfetchRanges.Len())
 
 	// TODO: takes up too much RAM
 	// construct the directories
-	newRootBytes, newLeavesBytes, _ := optimizeDirectories(reencoded, 16384-HeaderV3LenBytes, Gzip)
+	newRootBytes, newLeavesBytes, _ := BuildDirectories(reencoded, 16384-HeaderV3LenBytes, Gzip)
 
 	// 7. write the modified header
 	header.RootOffset = HeaderV3LenBytes
@@ -509,9 +523,10 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 			return err
 		}
 
-		outfile.Truncate(127 + int64(len(newRootBytes)) + int64(header.MetadataLength) + int64(len(newLeavesBytes)) + int64(totalActualBytes))
-
-		_, err = outfile.Write(headerBytes)
+		// set the file size and write empty space for the header for now
+		// see comment below
+		outfile.Truncate(HeaderV3LenBytes + int64(len(newRootBytes)) + int64(header.MetadataLength) + int64(len(newLeavesBytes)) + int64(totalActualBytes))
+		_, err = outfile.Write(make([]byte, HeaderV3LenBytes))
 		if err != nil {
 			return err
 		}
@@ -533,7 +548,10 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 			return err
 		}
 
-		outfile.Write(metadataBytes)
+		_, err = outfile.Write(metadataBytes)
+		if err != nil {
+			return err
+		}
 
 		// 10. write the leaf directories
 		_, err = outfile.Write(newLeavesBytes)
@@ -541,13 +559,11 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 			return err
 		}
 
-		bar := io.Discard
-		if ! quite {
-			bar = progressbar.DefaultBytes(
-				int64(totalBytes),
-				"fetching chunks",
-			)
-		}
+		bar := defaultBytesProgressbar(
+			logger,
+			int64(totalBytes),
+			"fetching chunks",
+		)
 
 		var mu sync.Mutex
 
@@ -608,17 +624,25 @@ func Extract(_ *log.Logger, bucketURL string, key string, minzoom int8, maxzoom 
 		if err != nil {
 			return err
 		}
+
+		// Write the header when finishing,
+		// otherwise a extract cancelled during the tile download section
+		// will appear valid with "pmtiles verify"
+		// even though the tile contents are corrupted.
+		outfile.Seek(0, io.SeekStart)
+		_, err = outfile.Write(headerBytes)
+		if err != nil {
+			return err
+		}
 	}
 
-	if ! quite {
-        	fmt.Printf("Completed in %v with %v download threads (%v tiles/s).\n", time.Since(start), downloadThreads, float64(len(reencoded))/float64(time.Since(start).Seconds()))
-		totalRequests := 2                  // header + root
-		totalRequests += numOverfetchLeaves // leaves
-		totalRequests++                     // metadata
-		totalRequests += numOverfetchRanges
-        	fmt.Printf("Extract required %d total requests.\n", totalRequests)
-        	fmt.Printf("Extract transferred %s (overfetch %v) for an archive size of %s\n", humanize.Bytes(totalBytes), overfetch, humanize.Bytes(totalActualBytes))
-	}
+	logger.Printf("Completed in %v with %v download threads (%v tiles/s).\n", time.Since(start), downloadThreads, float64(len(reencoded))/float64(time.Since(start).Seconds()))
+	totalRequests := 2                  // header + root
+	totalRequests += numOverfetchLeaves // leaves
+	totalRequests++                     // metadata
+	totalRequests += numOverfetchRanges
+	logger.Printf("Extract required %d total requests.\n", totalRequests)
+	logger.Printf("Extract transferred %s (overfetch %v) for an archive size of %s\n", humanize.Bytes(totalBytes), overfetch, humanize.Bytes(totalActualBytes))
 
 	return nil
 }
