@@ -352,6 +352,13 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		w = rec
+		cacheStatus := ""
+		defer func() {
+			log.Printf("served %d %s%s in %s", rec.status, strings.TrimPrefix(r.URL.Path, "/"), cacheStatus, time.Since(start))
+		}()
 		var archiveName string
 		var minZoom, maxZoom int8
 		var tileStr string
@@ -411,6 +418,10 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 		sourceFile := filepath.Join(sourceDir, archiveName+".pmtiles")
 		cacheFile := filepath.Join(baseCacheDir, cachePath)
 		
+		cacheStatus = " (cache miss)"
+		if _, err := os.Stat(cacheFile); err == nil {
+			cacheStatus = " (cache hit)"
+		}
 		serveExtracted(w, r, sourceFile, baseCacheDir, cacheFile, minZoom, maxZoom, tileStr)
 	}
 }
@@ -486,4 +497,14 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, baseCach
 			return
 		}
 	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
