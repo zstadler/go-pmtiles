@@ -453,21 +453,27 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, baseCach
 			tmpFile.Close() 
 			defer os.Remove(tempName)
 
-			err = pmtiles.Extract(
-				context.Background(),
-				log.New(io.Discard, "", 0),
-				"",
-				sourceFile,
-				minZoom,
-				maxZoom,
-				"",
-				"",
-				tileStr,
-				tempName,
-				4,
-				0.2,
-				false,
-			)
+			for attempt := 1; ; attempt++ {
+				err = pmtiles.Extract(
+					context.Background(),
+					log.New(io.Discard, "", 0),
+					"",
+					sourceFile,
+					minZoom,
+					maxZoom,
+					"",
+					"",
+					tileStr,
+					tempName,
+					4,
+					0.2,
+					false,
+				)
+				if attempt == 2 || !errors.As(err, new(*pmtiles.RefreshRequiredError)) {
+					break
+				}
+				log.Printf("Source %s changed during extraction, retrying", sourceFile)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("extraction failed: %w", err)
 			}
