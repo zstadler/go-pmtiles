@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/dustin/go-humanize"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/schollz/progressbar/v3"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/protomaps/go-pmtiles/pmtiles"
 	_ "gocloud.dev/blob/azureblob"
@@ -32,8 +32,6 @@ var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
-
-	extractGroup singleflight.Group
 
 	maxZoomRegex = regexp.MustCompile(`^/([^/]+)-(\d+)\.pmtiles$`)
 	minZoomRegex = regexp.MustCompile(`^/([^/]+)\+(\d+)-(\d+)-(\d+)\.pmtiles$`)
@@ -126,7 +124,6 @@ var cli struct {
 
 	ServeExtract struct {
 		SourceDir string `arg:"" help:"Directory containing source PMTiles archives" type:"existingdir"`
-		CacheDir  string `arg:"" help:"Directory to store extracted PMTiles caches" type:"existingdir"`
 		Interface string `default:"0.0.0.0"`
 		Port      int    `default:"8080"`
 		Cors      string `help:"Comma-separated list of allowed HTTP CORS origins"`
@@ -200,13 +197,13 @@ func main() {
 		} else {
 			logger.Fatal(startHTTPServer(cli.Serve.Interface+":"+strconv.Itoa(cli.Serve.Port), mux))
 		}
-	case "serve-extract <source-dir> <cache-dir>":
+	case "serve-extract <source-dir>":
 		pmtiles.SetBuildInfo(version, commit, date)
 
 		mux := http.NewServeMux()
-		mux.HandleFunc("/", ExtractServeHandler(cli.ServeExtract.CacheDir, cli.ServeExtract.SourceDir))
+		mux.HandleFunc("/", ExtractServeHandler(cli.ServeExtract.SourceDir))
 
-		logger.Printf("Serving extracts from %s to %s on port %d and interface %s with Access-Control-Allow-Origin: %s\n", cli.ServeExtract.SourceDir, cli.ServeExtract.CacheDir, cli.ServeExtract.Port, cli.ServeExtract.Interface, cli.ServeExtract.Cors)
+		logger.Printf("Serving extracts from %s on port %d and interface %s with Access-Control-Allow-Origin: %s\n", cli.ServeExtract.SourceDir, cli.ServeExtract.Port, cli.ServeExtract.Interface, cli.ServeExtract.Cors)
 		
 		if cli.ServeExtract.Cors != "" {
 			muxWithCors := pmtiles.NewCors(cli.ServeExtract.Cors).Handler(mux)
@@ -341,28 +338,18 @@ func startHTTPServer(addr string, handler http.Handler) error {
 	return server.ListenAndServe()
 }
 
-func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
-	// os.SameFile compares underlying inodes and device IDs, guaranteeing detection of overlap
-	// even when different host volume aliases are mounted to the container. This prevents 
-	// accidental overwrite of source files.
-	sourceStat, errSrc := os.Stat(sourceDir)
-	cacheStat, errCache := os.Stat(baseCacheDir)
-	if errSrc == nil && errCache == nil && os.SameFile(sourceStat, cacheStat) {
-		log.Fatalf("FATAL: sourceDir and baseCacheDir point to the same underlying directory. This must be separated to prevent data destruction.")
-	}
-
+func ExtractServeHandler(sourceDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		w = rec
-		cacheStatus := ""
 		defer func() {
-			log.Printf("served %d %s%s in %s", rec.status, strings.TrimPrefix(r.URL.Path, "/"), cacheStatus, time.Since(start))
+			log.Printf("served %d %s %s in %s", rec.status, strings.TrimPrefix(r.URL.Path, "/"), humanize.Bytes(uint64(rec.bytes)), time.Since(start))
 		}()
 		var archiveName string
 		var minZoom, maxZoom int8
 		var tileStr string
-		var cachePath string
+		var fileName string
 
 		if m := minZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
 			archiveName = filepath.Base(m[1])
@@ -390,7 +377,7 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 			minZoom = z
 			maxZoom = 24
 			tileStr = fmt.Sprintf("%d,%d,%d", z, x, y)
-			cachePath = fmt.Sprintf("%s+%d-%d-%d.pmtiles", archiveName, z, x, y)
+			fileName = fmt.Sprintf("%s+%d-%d-%d.pmtiles", archiveName, z, x, y)
 
 		} else if m := maxZoomRegex.FindStringSubmatch(r.URL.Path); m != nil {
 			archiveName = filepath.Base(m[1])
@@ -408,7 +395,7 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 			maxZoom = int8(parsedMax)
 			minZoom = 0
 			tileStr = ""
-			cachePath = fmt.Sprintf("%s-%d.pmtiles", archiveName, maxZoom)
+			fileName = fmt.Sprintf("%s-%d.pmtiles", archiveName, maxZoom)
 
 		} else {
 			http.NotFound(w, r)
@@ -416,98 +403,76 @@ func ExtractServeHandler(baseCacheDir, sourceDir string) http.HandlerFunc {
 		}
 
 		sourceFile := filepath.Join(sourceDir, archiveName+".pmtiles")
-		cacheFile := filepath.Join(baseCacheDir, cachePath)
-		
-		cacheStatus = " (cache miss)"
-		if _, err := os.Stat(cacheFile); err == nil {
-			cacheStatus = " (cache hit)"
-		}
-		serveExtracted(w, r, sourceFile, baseCacheDir, cacheFile, minZoom, maxZoom, tileStr)
+
+		serveExtracted(w, r, sourceFile, fileName, minZoom, maxZoom, tileStr)
 	}
 }
 
-func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, baseCacheDir, cacheFile string, minZoom, maxZoom int8, tileStr string) {
-	for {
-		if f, err := os.Open(cacheFile); err == nil {
-			stat, err := f.Stat()
-			if err == nil {
-				defer f.Close()
-				http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
-				return
-			}
-			f.Close()
+func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, fileName string, minZoom, maxZoom int8, tileStr string) {
+	tmpFile, err := os.CreateTemp("", "pmtiles-extract-*.tmp")
+	if err != nil {
+		log.Printf("Error serving extract for %s: failed to create temporary file: %v", fileName, err)
+		http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
+		return
+	}
+	tempName := tmpFile.Name()
+
+	tmpFile.Close()
+	defer os.Remove(tempName)
+
+	for attempt := 1; ; attempt++ {
+		err = pmtiles.Extract(
+			context.Background(),
+			log.New(io.Discard, "", 0),
+			"",
+			sourceFile,
+			minZoom,
+			maxZoom,
+			"",
+			"",
+			tileStr,
+			tempName,
+			4,
+			0.2,
+			false,
+		)
+		if attempt == 2 || !errors.As(err, new(*pmtiles.RefreshRequiredError)) {
+			break
 		}
-
-		// singleflight prevents cache stampedes for the same extraction parameters
-		_, err, _ := extractGroup.Do(cacheFile, func() (interface{}, error) {
-			if _, err := os.Stat(cacheFile); err == nil {
-				return nil, nil
-			}
-
-			tmpFile, err := os.CreateTemp(baseCacheDir, "pmtiles-extract-*.tmp")
-			if err != nil {
-				return nil, fmt.Errorf("failed to create temporary file: %w", err)
-			}
-			tempName := tmpFile.Name()
-			
-			tmpFile.Close() 
-			defer os.Remove(tempName)
-
-			for attempt := 1; ; attempt++ {
-				err = pmtiles.Extract(
-					context.Background(),
-					log.New(io.Discard, "", 0),
-					"",
-					sourceFile,
-					minZoom,
-					maxZoom,
-					"",
-					"",
-					tileStr,
-					tempName,
-					4,
-					0.2,
-					false,
-				)
-				if attempt == 2 || !errors.As(err, new(*pmtiles.RefreshRequiredError)) {
-					break
-				}
-				log.Printf("Source %s changed during extraction, retrying", sourceFile)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("extraction failed: %w", err)
-			}
-
-			targetDir := filepath.Dir(cacheFile)
-
-			if err := os.MkdirAll(targetDir, 0755); err != nil {
-				return nil, fmt.Errorf("failed to create target cache directories: %w", err)
-			}
-
-			if err := os.Rename(tempName, cacheFile); err != nil {
-				return nil, fmt.Errorf("failed to atomically finalize cache file: %w", err)
-			}
-
-			return nil, nil
-		})
-
-		if err != nil {
-			// Defends against TOCTOU race condition if source file is deleted/moved prior to extraction
-			if errors.Is(err, os.ErrNotExist) {
-				http.Error(w, "Source archive not found", http.StatusNotFound)
-				return
-			}
-			
-			log.Printf("Error serving extract for %s: %v", cacheFile, err)
-			http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
+		log.Printf("Source %s changed during extraction, retrying", sourceFile)
+	}
+	if err != nil {
+		// Defends against TOCTOU race condition if source file is deleted/moved prior to extraction
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "Source archive not found", http.StatusNotFound)
 			return
 		}
+
+		log.Printf("Error serving extract for %s: extraction failed: %v", fileName, err)
+		http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
+		return
 	}
+
+	f, err := os.Open(tempName)
+	if err != nil {
+		log.Printf("Error serving extract for %s: %v", fileName, err)
+		http.Error(w, "Failed to extract tile archive", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	http.ServeContent(w, r, fileName, time.Now(), f)
 }
 
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	bytes  int64
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += int64(n)
+	return n, err
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
