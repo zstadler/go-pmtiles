@@ -204,7 +204,7 @@ func main() {
 		mux.HandleFunc("/", ExtractServeHandler(cli.ServeExtract.SourceDir))
 
 		logger.Printf("Serving extracts from %s on port %d and interface %s with Access-Control-Allow-Origin: %s\n", cli.ServeExtract.SourceDir, cli.ServeExtract.Port, cli.ServeExtract.Interface, cli.ServeExtract.Cors)
-		
+
 		if cli.ServeExtract.Cors != "" {
 			muxWithCors := pmtiles.NewCors(cli.ServeExtract.Cors).Handler(mux)
 			logger.Fatal(startHTTPServer(cli.ServeExtract.Interface+":"+strconv.Itoa(cli.ServeExtract.Port), muxWithCors))
@@ -385,13 +385,13 @@ func ExtractServeHandler(sourceDir string) http.HandlerFunc {
 				http.Error(w, "Invalid archive name", http.StatusBadRequest)
 				return
 			}
-			
+
 			parsedMax, err := strconv.ParseInt(m[2], 10, 8)
 			if err != nil || parsedMax < 0 || parsedMax > 24 {
 				http.Error(w, "Invalid maximum zoom level", http.StatusBadRequest)
 				return
 			}
-			
+
 			maxZoom = int8(parsedMax)
 			minZoom = 0
 			tileStr = ""
