@@ -1,9 +1,13 @@
 name: test
 
 on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'serve-extract'
   pull_request:
     branches:
-      - "main"
+      - 'serve-extract'
 
 jobs:
   test:
