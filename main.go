@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -123,10 +124,16 @@ var cli struct {
 	} `cmd:"" help:"Run an HTTP proxy server for Z/X/Y tiles"`
 
 	ServeExtract struct {
-		SourceDir string `arg:"" help:"Directory containing source PMTiles archives" type:"existingdir"`
-		Interface string `default:"0.0.0.0"`
-		Port      int    `default:"8080"`
-		Cors      string `help:"Comma-separated list of allowed HTTP CORS origins"`
+		Source          string  `arg:"" help:"Directory or bucket prefix containing source PMTiles archives, or a single local or remote .pmtiles archive"`
+		Name            string  `help:"Name to serve instead of the source file name; requires a single .pmtiles source"`
+		Minzoom         int8    `default:"-1" help:"Minimum zoom level, inclusive"`
+		Maxzoom         int8    `default:"-1" help:"Maximum zoom level, inclusive"`
+		Interface       string  `default:"0.0.0.0"`
+		Port            int     `default:"8080"`
+		Cors            string  `help:"Comma-separated list of allowed HTTP CORS origins"`
+		Bucket          string  `help:"Remote bucket"`
+		DownloadThreads int     `default:"4" help:"Number of download threads"`
+		Overfetch       float32 `default:"0.05" help:"What ratio of extra data to download to minimize # requests; 0.2 is 20%"`
 	} `cmd:"" help:"Run an HTTP server that performs on-demand slicing of PMTiles sources"`
 
 	Upload struct {
@@ -197,13 +204,29 @@ func main() {
 		} else {
 			logger.Fatal(startHTTPServer(cli.Serve.Interface+":"+strconv.Itoa(cli.Serve.Port), mux))
 		}
-	case "serve-extract <source-dir>":
+	case "serve-extract <source>":
+		name := cli.ServeExtract.Name
+		if strings.HasSuffix(cli.ServeExtract.Source, ".pmtiles") {
+			if name == "" {
+				name = strings.TrimSuffix(path.Base(filepath.ToSlash(cli.ServeExtract.Source)), ".pmtiles")
+			}
+		} else {
+			if name != "" {
+				logger.Fatalf("--name requires a single .pmtiles source")
+			}
+			if stat, err := os.Stat(cli.ServeExtract.Source); cli.ServeExtract.Bucket == "" && (err != nil || !stat.IsDir()) {
+				logger.Fatalf("<source>: %s is not an existing directory", cli.ServeExtract.Source)
+			}
+		}
+		if cli.Quiet {
+			log.SetOutput(io.Discard)
+		}
 		pmtiles.SetBuildInfo(version, commit, date)
 
 		mux := http.NewServeMux()
-		mux.HandleFunc("/", ExtractServeHandler(cli.ServeExtract.SourceDir))
+		mux.HandleFunc("/", ExtractServeHandler(cli.ServeExtract.Bucket, cli.ServeExtract.Source, name, cli.ServeExtract.Minzoom, cli.ServeExtract.Maxzoom, cli.ServeExtract.DownloadThreads, cli.ServeExtract.Overfetch))
 
-		logger.Printf("Serving extracts from %s on port %d and interface %s with Access-Control-Allow-Origin: %s\n", cli.ServeExtract.SourceDir, cli.ServeExtract.Port, cli.ServeExtract.Interface, cli.ServeExtract.Cors)
+		logger.Printf("Serving extracts from %s %s on port %d and interface %s with Access-Control-Allow-Origin: %s\n", cli.ServeExtract.Bucket, cli.ServeExtract.Source, cli.ServeExtract.Port, cli.ServeExtract.Interface, cli.ServeExtract.Cors)
 
 		if cli.ServeExtract.Cors != "" {
 			muxWithCors := pmtiles.NewCors(cli.ServeExtract.Cors).Handler(mux)
@@ -338,7 +361,7 @@ func startHTTPServer(addr string, handler http.Handler) error {
 	return server.ListenAndServe()
 }
 
-func ExtractServeHandler(sourceDir string) http.HandlerFunc {
+func ExtractServeHandler(bucket, source, name string, minZoomLimit, maxZoomLimit int8, downloadThreads int, overfetch float32) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -402,13 +425,56 @@ func ExtractServeHandler(sourceDir string) http.HandlerFunc {
 			return
 		}
 
-		sourceFile := filepath.Join(sourceDir, archiveName+".pmtiles")
+		if minZoomLimit >= 0 && minZoom < minZoomLimit {
+			minZoom = minZoomLimit
+		}
+		if maxZoomLimit >= 0 && maxZoom > maxZoomLimit {
+			maxZoom = maxZoomLimit
+		}
+		if minZoom > maxZoom {
+			http.Error(w, "Zoom level above the maximum zoom level", http.StatusBadRequest)
+			return
+		}
 
-		serveExtracted(w, r, sourceFile, fileName, minZoom, maxZoom, tileStr)
+		sourceFile := filepath.Join(source, archiveName+".pmtiles")
+		if name != "" {
+			if archiveName != name {
+				http.NotFound(w, r)
+				return
+			}
+			sourceFile = source
+		}
+
+		serveExtracted(w, r, bucket, sourceFile, fileName, minZoom, maxZoom, tileStr, downloadThreads, overfetch)
 	}
 }
 
-func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, fileName string, minZoom, maxZoom int8, tileStr string) {
+func readHeader(bucketURL, sourceFile string) error {
+	bucketURL, key, err := pmtiles.NormalizeBucketKey(bucketURL, "", sourceFile)
+	if err != nil {
+		return err
+	}
+	bucket, err := pmtiles.OpenBucket(context.Background(), bucketURL, "")
+	if err != nil {
+		return err
+	}
+	defer bucket.Close()
+	reader, err := bucket.NewRangeReader(context.Background(), key, 0, pmtiles.HeaderV3LenBytes)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	_, err = io.Copy(io.Discard, reader)
+	return err
+}
+
+func serveExtracted(w http.ResponseWriter, r *http.Request, bucket, sourceFile, fileName string, minZoom, maxZoom int8, tileStr string, downloadThreads int, overfetch float32) {
+	if err := readHeader(bucket, sourceFile); err != nil {
+		log.Printf("Error serving extract for %s: %v", fileName, err)
+		http.Error(w, "Archive not found", http.StatusNotFound)
+		return
+	}
+
 	tmpFile, err := os.CreateTemp("", "pmtiles-extract-*.tmp")
 	if err != nil {
 		log.Printf("Error serving extract for %s: failed to create temporary file: %v", fileName, err)
@@ -424,7 +490,7 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, fileName
 		err = pmtiles.Extract(
 			context.Background(),
 			log.New(io.Discard, "", 0),
-			"",
+			bucket,
 			sourceFile,
 			minZoom,
 			maxZoom,
@@ -432,8 +498,8 @@ func serveExtracted(w http.ResponseWriter, r *http.Request, sourceFile, fileName
 			"",
 			tileStr,
 			tempName,
-			4,
-			0.2,
+			downloadThreads,
+			overfetch,
 			false,
 		)
 		if attempt == 2 || !errors.As(err, new(*pmtiles.RefreshRequiredError)) {
